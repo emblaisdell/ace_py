@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ace-py"
+version = "0.1.0"
+description = "Python FFI bindings for the Ontolog ACE interface"
+requires-python = ">=3.10"
+
+[project.scripts]
+ace-py = "ace_py.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ace_py"]
