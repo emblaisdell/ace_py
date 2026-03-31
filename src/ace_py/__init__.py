@@ -34,7 +34,8 @@ import struct
 import sys
 from typing import get_type_hints
 
-_registry: dict[str, object] = {}
+_registry: dict[str, dict] = {}
+# Each entry: {"fn": <callable>, "flags": list[str]}
 
 # ---------------------------------------------------------------------------
 # Type codec registry — extend for new types
@@ -107,10 +108,31 @@ def _write_blob(stream, data: bytes) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def calculation(fn):
-    """Register a function as a callable ACE calculation."""
-    _registry[fn.__name__] = fn
-    return fn
+def calculation(*flags):
+    """Register a function as a callable ACE calculation.
+
+    May be used with or without flag arguments::
+
+        @calculation
+        def add(a: int, b: int) -> int: ...
+
+        @calculation("cast")
+        def int2str(a: int) -> str: ...
+
+    Flag strings are recorded in the registry and emitted in .pho output.
+    """
+    def _register(fn):
+        _registry[fn.__name__] = {"fn": fn, "flags": list(flags)}
+        return fn
+
+    # @calculation with no parens — flags[0] is the decorated function
+    if len(flags) == 1 and callable(flags[0]):
+        fn = flags[0]
+        _registry[fn.__name__] = {"fn": fn, "flags": []}
+        return fn
+
+    # @calculation("cast", ...) — return the actual decorator
+    return _register
 
 
 def run(stdin=None, stdout=None, stderr=None) -> None:
@@ -143,7 +165,7 @@ def run(stdin=None, stdout=None, stderr=None) -> None:
         known = ", ".join(sorted(_registry)) or "(none)"
         die(f"unknown calculation {func_name!r}; registered: {known}")
 
-    fn = _registry[func_name]
+    fn = _registry[func_name]["fn"]
     hints = get_type_hints(fn)
     params = list(inspect.signature(fn).parameters.values())
 

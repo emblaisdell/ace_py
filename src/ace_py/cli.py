@@ -3,9 +3,8 @@ ace-py CLI
 
   ace-py run <module>                   Run one ACE request against <module>.
   ace-py call <module> <fn> [args...]   Call a @calculation and print results.
-  ace-py build <module>                 Write a Containerfile next to <module>
-                                        and stream the build context as a .tar
-                                        to stdout.
+  ace-py build <module>                 Write a Containerfile, <module>.tar,
+                                        and <module>.pho next to <module>.
 """
 
 import io
@@ -46,7 +45,7 @@ RUN pip install --no-cache-dir --no-index --find-links ./_vendor/ ace-py
 
 # Directories / patterns to exclude from the build context tar
 _EXCLUDE_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache", "dist", "build"}
-_EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".egg-info"}
+_EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".egg-info", ".tar"}
 
 
 def _cmd_run(args):
@@ -93,7 +92,7 @@ def _cmd_call(args):
         print(f"ace_py: unknown calculation {func_name!r}; registered: {known}", file=sys.stderr)
         sys.exit(1)
 
-    fn = _registry[func_name]
+    fn = _registry[func_name]["fn"]
     hints = get_type_hints(fn)
     params = list(inspect.signature(fn).parameters.values())
 
@@ -138,6 +137,59 @@ def _cmd_call(args):
             pass
         # Looks like binary — display as a signed big-endian integer
         print(int.from_bytes(blob, byteorder="big", signed=True))
+
+
+_PHO_TYPE_MAP: dict[type, str] = {
+    int: "Int",
+    str: "Str",
+}
+
+
+def _py_type_to_pho(t: type) -> str:
+    return _PHO_TYPE_MAP.get(t, t.__name__)
+
+
+def _generate_pho_content(registry: dict, tar_path: str) -> str:
+    import inspect
+    from typing import get_type_hints
+
+    lines = [f'calc "{tar_path}" {{']
+    entries = list(registry.items())
+    for i, (name, entry) in enumerate(entries):
+        fn = entry["fn"]
+        flags = entry["flags"]
+
+        doc = (fn.__doc__ or "").strip()
+        if doc:
+            for doc_line in doc.splitlines():
+                lines.append(f"    // {doc_line}")
+
+        for flag in flags:
+            lines.append(f"    @{flag}")
+
+        hints = get_type_hints(fn)
+        params = list(inspect.signature(fn).parameters.values())
+        param_types = " ".join(_py_type_to_pho(hints.get(p.name, str)) for p in params)
+        ret_type = _py_type_to_pho(hints.get("return", str))
+        lines.append(f"    {name} : {param_types} -> {ret_type};")
+
+        if i < len(entries) - 1:
+            lines.append("")
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _import_module(module_name: str) -> None:
+    import importlib
+    if "" not in sys.path:
+        sys.path.insert(0, "")
+    try:
+        importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        print(f"ace_py: could not import {module_name!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
 
 
 def _build_ace_py_wheel(wheel_dir: str) -> None:
@@ -203,8 +255,14 @@ def _cmd_build(args):
         print("Usage: ace-py build <module>", file=sys.stderr)
         sys.exit(1)
 
+    from ace_py import _registry
+
     module_name = args[0]
     build_root = _resolve_build_root(module_name)
+
+    tar_name = f"{module_name}.tar"
+    tar_path = os.path.join(build_root, tar_name)
+    pho_path = os.path.join(build_root, f"{module_name}.pho")
     containerfile_path = os.path.join(build_root, "Containerfile")
 
     # Write container build instructions
@@ -221,8 +279,7 @@ def _cmd_build(args):
         print("ace-py: building wheel...", file=sys.stderr)
         _build_ace_py_wheel(wheel_dir)
 
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tar:
+        with tarfile.open(tar_path, mode="w") as tar:
             # User's files
             for dirpath, dirnames, filenames in os.walk(build_root):
                 dirnames[:] = [
@@ -240,9 +297,14 @@ def _cmd_build(args):
             for filename in os.listdir(wheel_dir):
                 tar.add(os.path.join(wheel_dir, filename), arcname=f"_vendor/{filename}")
 
-    sys.stdout.buffer.write(buf.getvalue())
-    sys.stdout.buffer.flush()
-    print(f"ace-py: build context written ({buf.tell()} bytes)", file=sys.stderr)
+    print(f"ace-py: wrote {tar_path}", file=sys.stderr)
+
+    # Import module to populate the registry, then write the .pho
+    _import_module(module_name)
+    with open(pho_path, "w") as f:
+        f.write(_generate_pho_content(_registry, tar_name))
+        f.write("\n")
+    print(f"ace-py: wrote {pho_path}", file=sys.stderr)
 
 
 def main():
